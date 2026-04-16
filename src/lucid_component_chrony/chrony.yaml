@@ -1,0 +1,16 @@
+# Chrony NTP Sync Component Configuration
+# ────────────────────────────────────────
+# Default config shipped with the component.
+# Override per-device via config_path in agent config,
+# or place chrony.yaml next to the agent's working directory.
+
+# IP address of the NTP server (Central Command chrony container).
+ntp_server: "192.168.0.100"
+
+# How often to poll chronyc tracking for telemetry (seconds).
+telemetry_interval_s: 10
+
+# Offset threshold in milliseconds.
+# When abs(offset) exceeds this, a warning is logged.
+# Informational only — no enforcement or experiment blocking.
+max_offset_ms: 10.0

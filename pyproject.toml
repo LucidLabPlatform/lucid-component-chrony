@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69", "setuptools_scm[toml]>=8", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lucid-component-chrony"
+dynamic = ["version"]
+description = "LUCID component for chrony NTP clock synchronization on edge devices."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{ name = "LUCID" }]
+dependencies = [
+  "lucid-component-base @ git+https://github.com/LucidLabPlatform/lucid-component-base@v2.1.0",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-cov"]
+
+[project.entry-points."lucid_components"]
+chrony = "lucid_component_chrony.component:ChronyComponent"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["lucid_component_chrony*"]
+
+[tool.setuptools.package-data]
+lucid_component_chrony = ["*.yaml", "*.template"]
+
+[tool.setuptools_scm]
+version_scheme = "no-guess-dev"
+local_scheme = "no-local-version"
+fallback_version = "0.0.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
