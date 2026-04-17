@@ -141,9 +141,9 @@ class ChronyComponent(Component):
     """
 
     _DEFAULT_TELEMETRY_CFG = {
-        "offset_ms": {"enabled": True, "interval_s": 10, "change_threshold_percent": 5.0},
-        "stratum": {"enabled": True, "interval_s": 30, "change_threshold_percent": 0.0},
-        "reachability": {"enabled": True, "interval_s": 30, "change_threshold_percent": 0.0},
+        "offset_ms": {"enabled": False, "interval_s": 0.1, "change_threshold_percent": 5.0},
+        "stratum": {"enabled": False, "interval_s": 0.1, "change_threshold_percent": 0.0},
+        "reachability": {"enabled": False, "interval_s": 0.1, "change_threshold_percent": 0.0},
     }
 
     def __init__(self, context: ComponentContext) -> None:
