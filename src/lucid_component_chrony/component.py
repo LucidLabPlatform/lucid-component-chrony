@@ -239,7 +239,13 @@ class ChronyComponent(Component):
             agent_id=self.context.agent_id,
         )
         if not result.get("ok"):
-            raise RuntimeError(f"Helper start failed: {result.get('error', 'unknown')}")
+            error = result.get("error", "unknown")
+            if "Permission denied" in error or "No such file" in error or "Connection refused" in error:
+                raise RuntimeError(
+                    f"Cannot connect to lucid-chrony-helper: {error}. "
+                    "Run: sudo lucid-chrony-helper-installer --install-once"
+                )
+            raise RuntimeError(f"Helper start failed: {error}")
         self._sync_active = True
 
     def _stop_chronyd(self) -> None:

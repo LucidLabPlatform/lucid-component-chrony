@@ -193,7 +193,10 @@ def run_server() -> None:
         gid = _gid_for(LUCID_GROUP)
         if gid is not None:
             os.chown(path, 0, gid)
-        os.chmod(path, SOCKET_MODE)
+            os.chmod(path, SOCKET_MODE)
+        else:
+            # No lucid group — allow any local user to connect
+            os.chmod(path, 0o666)
     except OSError:
         pass
     server.listen(4)
