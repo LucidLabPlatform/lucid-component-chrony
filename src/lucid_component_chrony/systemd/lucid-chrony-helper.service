@@ -1,0 +1,23 @@
+[Unit]
+Description=LUCID chrony helper (root-owned, manages chronyd subprocess)
+After=network-online.target
+# Start before agent so socket exists when component starts
+Before=lucid-agent-core.service
+# When agent-core stops/restarts, stop helper too (PartOf propagates stop/restart)
+PartOf=lucid-agent-core.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+RuntimeDirectory=lucid
+RuntimeDirectoryMode=0755
+# Use the same venv as lucid-agent-core; adjust if your install path differs
+ExecStart=/home/lucid/lucid-agent-core/venv/bin/lucid-chrony-helper
+Restart=always
+RestartSec=5
+TimeoutStartSec=30
+SyslogIdentifier=lucid-chrony-helper
+
+[Install]
+WantedBy=multi-user.target

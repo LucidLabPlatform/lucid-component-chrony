@@ -18,6 +18,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov"]
 
+[project.scripts]
+lucid-chrony-helper = "lucid_component_chrony.helper_server:main"
+lucid-chrony-helper-installer = "lucid_component_chrony.helper_installer:main"
+
 [project.entry-points."lucid_components"]
 chrony = "lucid_component_chrony.component:ChronyComponent"
 
@@ -33,7 +37,7 @@ where = ["src"]
 include = ["lucid_component_chrony*"]
 
 [tool.setuptools.package-data]
-lucid_component_chrony = ["*.yaml", "*.template"]
+lucid_component_chrony = ["*.yaml", "*.template", "systemd/*.service"]
 
 [tool.setuptools_scm]
 version_scheme = "no-guess-dev"

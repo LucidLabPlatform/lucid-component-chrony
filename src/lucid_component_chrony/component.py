@@ -1,28 +1,25 @@
 """
-Chrony NTP Sync — LUCID component that manages a chronyd subprocess
-for clock synchronization on edge devices.
+Chrony NTP Sync — LUCID component for clock synchronization on edge devices.
 
-Spawns chronyd in foreground mode (-d), polls chronyc for sync status,
-and publishes offset/stratum/reachability as MQTT telemetry.
+Delegates chronyd lifecycle to the lucid-chrony-helper daemon (runs as root
+via systemd). The component polls chronyc (non-root) for sync status and
+publishes offset/stratum/reachability as MQTT telemetry.
 
 Configuration is loaded from chrony.yaml shipped alongside this module.
 To override, set "config_path" in the component context config or place
 chrony.yaml next to the agent's working directory.
 
-Device prerequisites (one-time, baked into image):
+Device prerequisites (one-time):
   1. apt install chrony
-  2. sudo setcap cap_sys_time+ep /usr/sbin/chronyd
+  2. sudo lucid-chrony-helper-installer --install-once
 """
 from __future__ import annotations
 
 import copy
 import json
 import logging
-import os
 import shutil
-import signal
 import subprocess
-import tempfile
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,10 +29,11 @@ import yaml
 
 from lucid_component_base import Component, ComponentContext
 
+from . import client as chrony_client
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_CONFIG_PATH = Path(__file__).parent / "chrony.yaml"
-_CONF_TEMPLATE_PATH = Path(__file__).parent / "chrony.conf.template"
 
 
 def _utc_iso() -> str:
@@ -157,13 +155,11 @@ class ChronyComponent(Component):
         self._max_offset_ms: float = float(cfg.get("max_offset_ms", 10.0))
 
         # Runtime state
-        self._chronyd_proc: subprocess.Popen | None = None
         self._sync_active: bool = False
         self._tracking_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._latest_tracking: dict[str, Any] = {}
         self._tracking_lock = threading.Lock()
-        self._runtime_conf_path: str | None = None
 
     @property
     def component_id(self) -> str:
@@ -222,11 +218,6 @@ class ChronyComponent(Component):
     # -- lifecycle ------------------------------------------------------------
 
     def _start(self) -> None:
-        if not shutil.which("chronyd"):
-            raise RuntimeError(
-                "chronyd not found on PATH. Install chrony and ensure "
-                "CAP_SYS_TIME is set: sudo setcap cap_sys_time+ep /usr/sbin/chronyd"
-            )
         if not shutil.which("chronyc"):
             raise RuntimeError("chronyc not found on PATH. Install chrony.")
 
@@ -239,74 +230,24 @@ class ChronyComponent(Component):
         self._stop_chronyd()
         self._log.info("Chrony component stopped")
 
-    # -- chronyd subprocess management ----------------------------------------
+    # -- chronyd lifecycle via helper daemon ----------------------------------
 
-    def _write_runtime_conf(self) -> str:
-        """Write a runtime chrony.conf from the template and return its path."""
-        template = _CONF_TEMPLATE_PATH.read_text(encoding="utf-8")
-        content = template.format(
+    def _start_chronyd(self) -> None:
+        """Ask the helper daemon to start chronyd."""
+        result = chrony_client.start(
             ntp_server=self._ntp_server,
             agent_id=self.context.agent_id,
         )
-        fd, path = tempfile.mkstemp(
-            prefix=f"lucid-chrony-{self.context.agent_id}-", suffix=".conf",
-        )
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-        return path
-
-    def _start_chronyd(self) -> None:
-        """Spawn chronyd in foreground mode."""
-        if self._chronyd_proc is not None and self._chronyd_proc.poll() is None:
-            self._log.info("chronyd already running (pid %d)", self._chronyd_proc.pid)
-            self._sync_active = True
-            return
-
-        self._runtime_conf_path = self._write_runtime_conf()
-        self._log.info(
-            "Starting chronyd with server %s (conf: %s)",
-            self._ntp_server, self._runtime_conf_path,
-        )
-
-        self._chronyd_proc = subprocess.Popen(
-            ["chronyd", "-d", "-f", self._runtime_conf_path],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            preexec_fn=os.setsid,
-        )
+        if not result.get("ok"):
+            raise RuntimeError(f"Helper start failed: {result.get('error', 'unknown')}")
         self._sync_active = True
 
     def _stop_chronyd(self) -> None:
-        """Stop the chronyd subprocess (SIGINT → SIGKILL)."""
-        proc = self._chronyd_proc
-        if proc is None or proc.poll() is not None:
-            self._chronyd_proc = None
-            self._sync_active = False
-            self._cleanup_runtime_conf()
-            return
-
-        self._log.info("Stopping chronyd (pid %d)", proc.pid)
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            self._log.warning("chronyd did not exit in 10s, sending SIGKILL")
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            proc.wait(timeout=5)
-        except ProcessLookupError:
-            pass
-
-        self._chronyd_proc = None
+        """Ask the helper daemon to stop chronyd."""
+        result = chrony_client.stop()
+        if not result.get("ok"):
+            self._log.warning("Helper stop returned error: %s", result.get("error"))
         self._sync_active = False
-        self._cleanup_runtime_conf()
-
-    def _cleanup_runtime_conf(self) -> None:
-        if self._runtime_conf_path and os.path.exists(self._runtime_conf_path):
-            try:
-                os.unlink(self._runtime_conf_path)
-            except OSError:
-                pass
-            self._runtime_conf_path = None
 
     # -- telemetry polling ----------------------------------------------------
 
@@ -419,9 +360,11 @@ class ChronyComponent(Component):
         except json.JSONDecodeError:
             request_id = ""
 
-        if self._sync_active and self._chronyd_proc and self._chronyd_proc.poll() is None:
-            self.publish_result("start_sync", request_id, ok=True, error=None)
-            return
+        if self._sync_active:
+            status = chrony_client.status()
+            if status.get("ok") and status.get("running"):
+                self.publish_result("start_sync", request_id, ok=True, error=None)
+                return
 
         try:
             self._start_chronyd()
