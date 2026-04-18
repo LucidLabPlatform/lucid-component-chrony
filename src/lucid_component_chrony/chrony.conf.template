@@ -3,3 +3,5 @@
 server {ntp_server} iburst prefer
 makestep 1.0 3
 driftfile /tmp/lucid-chrony-{agent_id}.drift
+pidfile /tmp/lucid-chrony-{agent_id}.pid
+bindcmdaddress /tmp/lucid-chrony-{agent_id}.sock

@@ -292,11 +292,17 @@ class ChronyComponent(Component):
 
             self.publish_state()
 
+    @property
+    def _chronyc_socket(self) -> str:
+        """Path to the chronyc command socket for this agent's chronyd instance."""
+        return f"/tmp/lucid-chrony-{self.context.agent_id}.sock"
+
     def _poll_chronyc(self) -> dict[str, Any] | None:
         """Run chronyc tracking + sources and return merged result."""
+        chronyc_cmd = ["chronyc", "-h", self._chronyc_socket, "-c"]
         try:
             tracking_result = subprocess.run(
-                ["chronyc", "-c", "tracking"],
+                [*chronyc_cmd, "tracking"],
                 capture_output=True, text=True, timeout=10,
             )
             if tracking_result.returncode != 0:
@@ -311,7 +317,7 @@ class ChronyComponent(Component):
 
             # Get reachability from sources
             sources_result = subprocess.run(
-                ["chronyc", "-c", "sources"],
+                [*chronyc_cmd, "sources"],
                 capture_output=True, text=True, timeout=10,
             )
             if sources_result.returncode == 0:
