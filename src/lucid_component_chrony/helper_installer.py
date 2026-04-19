@@ -32,7 +32,26 @@ def install_once() -> int:
         if not unit_src.is_file():
             logger.error("Unit file not found: %s", unit_src)
             return 1
-        shutil.copy2(unit_src, UNIT_DEST)
+
+        # Detect the actual helper binary path from the running venv.
+        # The unit file ships with a placeholder path — substitute it here
+        # so the service works regardless of which user/directory hosts the venv.
+        helper_bin = shutil.which("lucid-chrony-helper")
+        if not helper_bin:
+            logger.error("lucid-chrony-helper not found on PATH — is the venv active?")
+            return 1
+
+        unit_text = unit_src.read_text()
+        # Replace any ExecStart line with the detected binary path
+        import re
+        unit_text = re.sub(
+            r"^ExecStart=.*$",
+            f"ExecStart={helper_bin}",
+            unit_text,
+            flags=re.MULTILINE,
+        )
+        UNIT_DEST.write_text(unit_text)
+        logger.info("Wrote unit file with ExecStart=%s", helper_bin)
     except Exception:
         logger.exception("Copy failed")
         return 1
