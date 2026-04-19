@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -43,11 +44,12 @@ def _utc_iso() -> str:
 # -- config loading -----------------------------------------------------------
 
 def _load_chrony_config(context_config: dict[str, Any]) -> dict[str, Any]:
-    """Load chrony YAML config with 3-tier resolution.
+    """Load chrony YAML config with 4-tier resolution.
 
-    1. context_config["config_path"] — explicit override
-    2. ./chrony.yaml                 — working directory
-    3. <package>/chrony.yaml         — default shipped with component
+    1. LUCID_CHRONY_NTP_SERVER env var — per-device override (highest priority)
+    2. context_config["config_path"]  — explicit override
+    3. ./chrony.yaml                  — working directory
+    4. <package>/chrony.yaml          — default shipped with component
     """
     explicit = context_config.get("config_path")
     if explicit:
@@ -56,21 +58,26 @@ def _load_chrony_config(context_config: dict[str, Any]) -> dict[str, Any]:
             raise FileNotFoundError(f"Chrony config not found: {p}")
         logger.info("Loading chrony config from explicit path: %s", p)
         with p.open("r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-
-    local = Path("chrony.yaml")
-    if local.is_file():
+            cfg = yaml.safe_load(f) or {}
+    elif Path("chrony.yaml").is_file():
+        local = Path("chrony.yaml")
         logger.info("Loading chrony config from working dir: %s", local.resolve())
         with local.open("r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-
-    if _DEFAULT_CONFIG_PATH.is_file():
+            cfg = yaml.safe_load(f) or {}
+    elif _DEFAULT_CONFIG_PATH.is_file():
         logger.info("Loading chrony config from package default: %s", _DEFAULT_CONFIG_PATH)
         with _DEFAULT_CONFIG_PATH.open("r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+            cfg = yaml.safe_load(f) or {}
+    else:
+        logger.warning("No chrony.yaml found — using built-in defaults")
+        cfg = {}
 
-    logger.warning("No chrony.yaml found — using built-in defaults")
-    return {}
+    env_ntp = os.getenv("LUCID_CHRONY_NTP_SERVER")
+    if env_ntp:
+        logger.info("Overriding ntp_server from LUCID_CHRONY_NTP_SERVER env var: %s", env_ntp)
+        cfg["ntp_server"] = env_ntp
+
+    return cfg
 
 
 # -- chronyc output parsers ---------------------------------------------------
@@ -150,7 +157,7 @@ class ChronyComponent(Component):
 
         cfg = _load_chrony_config(dict(context.config))
 
-        self._ntp_server: str = str(cfg.get("ntp_server", "192.168.0.100"))
+        self._ntp_server: str = str(cfg.get("ntp_server", "pool.ntp.org"))
         self._telemetry_interval_s: float = float(cfg.get("telemetry_interval_s", 10))
         self._max_offset_ms: float = float(cfg.get("max_offset_ms", 10.0))
 
@@ -220,6 +227,15 @@ class ChronyComponent(Component):
     def _start(self) -> None:
         if not shutil.which("chronyc"):
             raise RuntimeError("chronyc not found on PATH. Install chrony.")
+
+        result = chrony_client.ping()
+        if not result.get("ok"):
+            error = result.get("error", "unknown")
+            self._publish_all_retained()
+            raise RuntimeError(
+                f"Cannot connect to lucid-chrony-helper: {error}. "
+                "Run: sudo lucid-chrony-helper-installer --install-once"
+            )
 
         self._start_tracking_thread()
         self._publish_all_retained()
@@ -438,13 +454,30 @@ class ChronyComponent(Component):
                 applied["max_offset_ms"] = self._max_offset_ms
 
         if "ntp_server" in set_dict:
-            rejected["ntp_server"] = "cannot be changed at runtime; restart required"
+            val = str(set_dict["ntp_server"]).strip()
+            if not val:
+                rejected["ntp_server"] = "must be a non-empty string"
+            else:
+                was_active = self._sync_active
+                if was_active:
+                    self._stop_chronyd()
+                self._ntp_server = val
+                applied["ntp_server"] = self._ntp_server
+                if was_active:
+                    try:
+                        self._start_chronyd()
+                    except Exception as exc:
+                        self._log.error("Failed to restart chronyd after NTP server change: %s", exc)
+                        applied.pop("ntp_server")
+                        rejected["ntp_server"] = f"updated but restart failed: {exc}"
 
         known_keys = {"telemetry_interval_s", "max_offset_ms", "ntp_server"}
         for key in set_dict:
             if key not in known_keys:
                 rejected[key] = "unknown config key"
 
+        if "ntp_server" in applied:
+            self.publish_metadata()
         self.publish_state()
         self.publish_cfg()
         self.publish_cfg_set_result(

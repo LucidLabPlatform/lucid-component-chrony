@@ -20,7 +20,7 @@ def test_instantiation_with_defaults(monkeypatch):
     ctx = make_context()
     comp = ChronyComponent(ctx)
     assert comp.component_id == "chrony"
-    assert comp._ntp_server == "192.168.0.100"
+    assert comp._ntp_server == "pool.ntp.org"
     assert comp._telemetry_interval_s == 10
     assert comp._max_offset_ms == 10.0
 
@@ -62,7 +62,7 @@ def test_get_state_payload(monkeypatch):
     comp = ChronyComponent(make_context())
     state = comp.get_state_payload()
     assert state["sync_active"] is False
-    assert state["ntp_server"] == "192.168.0.100"
+    assert state["ntp_server"] == "pool.ntp.org"
     assert state["offset_ms"] is None
     assert state["stratum"] is None
     assert state["reachability"] is None
@@ -73,7 +73,7 @@ def test_get_cfg_payload(monkeypatch):
     comp = ChronyComponent(make_context())
     cfg = comp.get_cfg_payload()
     assert cfg == {
-        "ntp_server": "192.168.0.100",
+        "ntp_server": "pool.ntp.org",
         "telemetry_interval_s": 10,
         "max_offset_ms": 10.0,
     }
@@ -85,7 +85,7 @@ def test_metadata_includes_capabilities(monkeypatch):
     meta = comp.metadata()
     assert "capabilities" in meta
     assert "start_sync" in meta["capabilities"]
-    assert meta["ntp_server"] == "192.168.0.100"
+    assert meta["ntp_server"] == "pool.ntp.org"
 
 
 def test_schema_has_custom_fields(monkeypatch):
@@ -102,9 +102,11 @@ def test_schema_has_custom_fields(monkeypatch):
 # -- lifecycle ----------------------------------------------------------------
 
 
+@patch("lucid_component_chrony.component.chrony_client")
 @patch("lucid_component_chrony.component.shutil.which", return_value="/usr/bin/chronyc")
-def test_start_monitors_without_restarting_chrony(mock_which, monkeypatch):
+def test_start_monitors_without_restarting_chrony(mock_which, mock_client, monkeypatch):
     """Component starts monitoring but does NOT restart chrony automatically."""
+    mock_client.ping.return_value = {"ok": True}
     monkeypatch.chdir("/tmp")
 
     ctx = make_context()
@@ -268,7 +270,7 @@ def test_cfg_set_mutable_keys(monkeypatch):
     assert results[0]["applied"]["telemetry_interval_s"] == 5
 
 
-def test_cfg_set_ntp_server_rejected(monkeypatch):
+def test_cfg_set_ntp_server_accepted(monkeypatch):
     monkeypatch.chdir("/tmp")
     ctx = make_context()
     comp = ChronyComponent(ctx)
@@ -278,15 +280,43 @@ def test_cfg_set_ntp_server_rejected(monkeypatch):
         "set": {"ntp_server": "10.0.0.99"},
     }))
 
-    # ntp_server should not change
-    assert comp._ntp_server == "192.168.0.100"
+    assert comp._ntp_server == "10.0.0.99"
     mqtt: FakeMqtt = ctx.mqtt
     results = [
         json.loads(p) for t, p, q, r in mqtt.published
         if "evt/cfg/set/result" in t
     ]
-    error = json.loads(results[0]["error"])
-    assert "ntp_server" in error["rejected"]
+    assert results[0]["ok"] is True
+    assert results[0]["applied"]["ntp_server"] == "10.0.0.99"
+
+
+@patch("lucid_component_chrony.component.chrony_client")
+def test_cfg_set_ntp_server_restarts_sync_if_running(mock_client, monkeypatch):
+    """Changing ntp_server while sync is active stops and restarts chronyd."""
+    monkeypatch.chdir("/tmp")
+    mock_client.stop.return_value = {"ok": True}
+    mock_client.start.return_value = {"ok": True}
+
+    ctx = make_context()
+    comp = ChronyComponent(ctx)
+    comp._sync_active = True
+
+    comp.on_cmd_cfg_set(json.dumps({
+        "request_id": "c8",
+        "set": {"ntp_server": "time.cloudflare.com"},
+    }))
+
+    assert comp._ntp_server == "time.cloudflare.com"
+    mock_client.stop.assert_called_once()
+    mock_client.start.assert_called_once()
+    assert mock_client.start.call_args.kwargs["ntp_server"] == "time.cloudflare.com"
+    mqtt: FakeMqtt = ctx.mqtt
+    results = [
+        json.loads(p) for t, p, q, r in mqtt.published
+        if "evt/cfg/set/result" in t
+    ]
+    assert results[0]["ok"] is True
+    assert results[0]["applied"]["ntp_server"] == "time.cloudflare.com"
 
 
 def test_cfg_set_unknown_key_rejected(monkeypatch):
@@ -383,6 +413,14 @@ def test_config_fallback_to_empty(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "_DEFAULT_CONFIG_PATH", tmp_path / "nonexistent.yaml")
     cfg = _load_chrony_config({})
     assert cfg == {}
+
+
+def test_env_var_overrides_default_ntp_server(monkeypatch):
+    """LUCID_CHRONY_NTP_SERVER env var takes priority over any yaml config."""
+    monkeypatch.chdir("/tmp")
+    monkeypatch.setenv("LUCID_CHRONY_NTP_SERVER", "ntp.mylab.io")
+    comp = ChronyComponent(make_context())
+    assert comp._ntp_server == "ntp.mylab.io"
 
 
 # -- _poll_chronyc ------------------------------------------------------------

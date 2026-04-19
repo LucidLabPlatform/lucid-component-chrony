@@ -4,8 +4,9 @@
 # Override per-device via config_path in agent config,
 # or place chrony.yaml next to the agent's working directory.
 
-# IP address of the NTP server (Central Command chrony container).
-ntp_server: "192.168.0.100"
+# NTP server address. Override per-device via LUCID_CHRONY_NTP_SERVER env var
+# or place a chrony.yaml next to the agent's working directory.
+ntp_server: "pool.ntp.org"
 
 # How often to poll chronyc tracking for telemetry (seconds).
 telemetry_interval_s: 10

@@ -28,6 +28,13 @@ chrony = "lucid_component_chrony.component:ChronyComponent"
 [tool.setuptools]
 package-dir = {"" = "src"}
 
+[tool.coverage.run]
+omit = [
+  "src/lucid_component_chrony/client.py",
+  "src/lucid_component_chrony/helper_server.py",
+  "src/lucid_component_chrony/helper_installer.py",
+]
+
 [tool.coverage.report]
 fail_under = 85
 show_missing = true
