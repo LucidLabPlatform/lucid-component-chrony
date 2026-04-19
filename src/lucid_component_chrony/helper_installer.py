@@ -33,13 +33,23 @@ def install_once() -> int:
             logger.error("Unit file not found: %s", unit_src)
             return 1
 
-        # Detect the actual helper binary path from the running venv.
-        # The unit file ships with a placeholder path — substitute it here
-        # so the service works regardless of which user/directory hosts the venv.
-        helper_bin = shutil.which("lucid-chrony-helper")
-        if not helper_bin:
-            logger.error("lucid-chrony-helper not found on PATH — is the venv active?")
-            return 1
+        # Resolve the helper binary path. The helper is always co-installed in
+        # the same venv/bin/ directory as this installer, so look there first.
+        # This works even when sudo resets PATH (use: sudo /full/path/to/installer).
+        installer_bin = Path(sys.argv[0]).resolve()
+        sibling = installer_bin.with_name("lucid-chrony-helper")
+        if sibling.is_file():
+            helper_bin = str(sibling)
+        else:
+            found = shutil.which("lucid-chrony-helper")
+            if not found:
+                logger.error(
+                    "lucid-chrony-helper not found next to installer (%s) or on PATH. "
+                    "Run: sudo env PATH=\"<venv>/bin:$PATH\" lucid-chrony-helper-installer --install-once",
+                    sibling,
+                )
+                return 1
+            helper_bin = found
 
         unit_text = unit_src.read_text()
         # Replace any ExecStart line with the detected binary path
