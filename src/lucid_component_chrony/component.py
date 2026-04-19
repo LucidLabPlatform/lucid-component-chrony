@@ -221,7 +221,6 @@ class ChronyComponent(Component):
         if not shutil.which("chronyc"):
             raise RuntimeError("chronyc not found on PATH. Install chrony.")
 
-        self._start_chronyd()
         self._start_tracking_thread()
         self._publish_all_retained()
 

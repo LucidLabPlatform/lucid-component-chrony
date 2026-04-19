@@ -102,34 +102,31 @@ def test_schema_has_custom_fields(monkeypatch):
 # -- lifecycle ----------------------------------------------------------------
 
 
-@patch("lucid_component_chrony.component.chrony_client")
 @patch("lucid_component_chrony.component.shutil.which", return_value="/usr/bin/chronyc")
-def test_start_delegates_to_helper(mock_which, mock_client, monkeypatch):
-    """Component delegates chronyd management to the helper daemon."""
+def test_start_monitors_without_restarting_chrony(mock_which, monkeypatch):
+    """Component starts monitoring but does NOT restart chrony automatically."""
     monkeypatch.chdir("/tmp")
-    mock_client.start.return_value = {"ok": True}
 
     ctx = make_context()
     comp = ChronyComponent(ctx)
     comp._start()
 
-    mock_client.start.assert_called_once_with(
-        ntp_server="192.168.0.100", agent_id="test-agent",
-    )
-    assert comp._sync_active is True
+    # sync_active stays False — user must send start_sync explicitly
+    assert comp._sync_active is False
+    # tracking thread is running (monitoring system chrony)
+    assert comp._tracking_thread is not None
+    assert comp._tracking_thread.is_alive()
 
     # Clean up
     comp._stop_event.set()
-    if comp._tracking_thread:
-        comp._tracking_thread.join(timeout=2)
+    comp._tracking_thread.join(timeout=2)
 
 
 @patch("lucid_component_chrony.component.chrony_client")
 @patch("lucid_component_chrony.component.shutil.which", return_value="/usr/bin/chronyc")
 def test_stop_delegates_to_helper(mock_which, mock_client, monkeypatch):
-    """Component delegates stop to the helper daemon."""
+    """Component delegates stop (reset to default) to the helper daemon."""
     monkeypatch.chdir("/tmp")
-    mock_client.start.return_value = {"ok": True}
     mock_client.stop.return_value = {"ok": True}
 
     ctx = make_context()
