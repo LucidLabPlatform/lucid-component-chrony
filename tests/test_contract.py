@@ -102,25 +102,20 @@ def test_schema_has_custom_fields(monkeypatch):
 # -- lifecycle ----------------------------------------------------------------
 
 
-@patch("lucid_component_chrony.component.subprocess.Popen")
-@patch("lucid_component_chrony.component.shutil.which", return_value="/usr/sbin/chronyd")
-def test_start_spawns_chronyd(mock_which, mock_popen, monkeypatch):
+@patch("lucid_component_chrony.component.chrony_client")
+@patch("lucid_component_chrony.component.shutil.which", return_value="/usr/bin/chronyc")
+def test_start_delegates_to_helper(mock_which, mock_client, monkeypatch):
+    """Component delegates chronyd management to the helper daemon."""
     monkeypatch.chdir("/tmp")
-    mock_proc = MagicMock()
-    mock_proc.poll.return_value = None
-    mock_proc.pid = 12345
-    mock_popen.return_value = mock_proc
+    mock_client.start.return_value = {"ok": True}
 
     ctx = make_context()
     comp = ChronyComponent(ctx)
     comp._start()
 
-    mock_popen.assert_called_once()
-    call_args = mock_popen.call_args
-    cmd = call_args[0][0]
-    assert cmd[0] == "chronyd"
-    assert "-d" in cmd
-    assert "-f" in cmd
+    mock_client.start.assert_called_once_with(
+        ntp_server="192.168.0.100", agent_id="test-agent",
+    )
     assert comp._sync_active is True
 
     # Clean up
@@ -129,30 +124,21 @@ def test_start_spawns_chronyd(mock_which, mock_popen, monkeypatch):
         comp._tracking_thread.join(timeout=2)
 
 
-@patch("lucid_component_chrony.component.shutil.which", return_value=None)
-def test_start_fails_when_chronyd_missing(mock_which, monkeypatch):
+@patch("lucid_component_chrony.component.chrony_client")
+@patch("lucid_component_chrony.component.shutil.which", return_value="/usr/bin/chronyc")
+def test_stop_delegates_to_helper(mock_which, mock_client, monkeypatch):
+    """Component delegates stop to the helper daemon."""
     monkeypatch.chdir("/tmp")
-    comp = ChronyComponent(make_context())
-    with pytest.raises(RuntimeError, match="chronyd not found"):
-        comp._start()
-
-
-@patch("lucid_component_chrony.component.subprocess.Popen")
-@patch("lucid_component_chrony.component.shutil.which", return_value="/usr/sbin/chronyd")
-def test_stop_kills_chronyd(mock_which, mock_popen, monkeypatch):
-    monkeypatch.chdir("/tmp")
-    mock_proc = MagicMock()
-    mock_proc.poll.return_value = None
-    mock_proc.pid = 12345
-    mock_popen.return_value = mock_proc
+    mock_client.start.return_value = {"ok": True}
+    mock_client.stop.return_value = {"ok": True}
 
     ctx = make_context()
     comp = ChronyComponent(ctx)
     comp._start()
     comp._stop()
 
+    mock_client.stop.assert_called_once()
     assert comp._sync_active is False
-    assert comp._chronyd_proc is None
 
 
 # -- command handlers ---------------------------------------------------------
@@ -202,14 +188,10 @@ def test_cmd_reset_clears_tracking(monkeypatch):
     assert results[0]["ok"] is True
 
 
-@patch("lucid_component_chrony.component.subprocess.Popen")
-@patch("lucid_component_chrony.component.shutil.which", return_value="/usr/sbin/chronyd")
-def test_cmd_start_sync(mock_which, mock_popen, monkeypatch):
+@patch("lucid_component_chrony.component.chrony_client")
+def test_cmd_start_sync(mock_client, monkeypatch):
     monkeypatch.chdir("/tmp")
-    mock_proc = MagicMock()
-    mock_proc.poll.return_value = None
-    mock_proc.pid = 99
-    mock_popen.return_value = mock_proc
+    mock_client.start.return_value = {"ok": True}
 
     ctx = make_context()
     comp = ChronyComponent(ctx)
@@ -229,24 +211,19 @@ def test_cmd_start_sync(mock_which, mock_popen, monkeypatch):
         comp._tracking_thread.join(timeout=2)
 
 
-@patch("lucid_component_chrony.component.subprocess.Popen")
-@patch("lucid_component_chrony.component.shutil.which", return_value="/usr/sbin/chronyd")
-def test_cmd_start_sync_idempotent(mock_which, mock_popen, monkeypatch):
+@patch("lucid_component_chrony.component.chrony_client")
+def test_cmd_start_sync_idempotent(mock_client, monkeypatch):
     monkeypatch.chdir("/tmp")
-    mock_proc = MagicMock()
-    mock_proc.poll.return_value = None
-    mock_proc.pid = 99
-    mock_popen.return_value = mock_proc
+    mock_client.status.return_value = {"ok": True, "running": True}
 
     ctx = make_context()
     comp = ChronyComponent(ctx)
-    comp._chronyd_proc = mock_proc
     comp._sync_active = True
 
     comp.on_cmd_start_sync(json.dumps({"request_id": "r4"}))
 
-    # Should not spawn a second process
-    mock_popen.assert_not_called()
+    # Should not call start again — already running
+    mock_client.start.assert_not_called()
     mqtt: FakeMqtt = ctx.mqtt
     results = [
         json.loads(p) for t, p, q, r in mqtt.published
@@ -411,43 +388,6 @@ def test_config_fallback_to_empty(monkeypatch, tmp_path):
     assert cfg == {}
 
 
-# -- write_runtime_conf -------------------------------------------------------
-
-
-def test_write_runtime_conf_creates_file(monkeypatch):
-    monkeypatch.chdir("/tmp")
-    ctx = make_context()
-    comp = ChronyComponent(ctx)
-    path = comp._write_runtime_conf()
-    assert os.path.exists(path)
-    content = open(path).read()
-    assert "192.168.0.100" in content
-    assert "test-agent" in content
-    os.unlink(path)
-
-
-# -- cleanup_runtime_conf ----------------------------------------------------
-
-
-def test_cleanup_runtime_conf_removes_file(monkeypatch):
-    monkeypatch.chdir("/tmp")
-    ctx = make_context()
-    comp = ChronyComponent(ctx)
-    path = comp._write_runtime_conf()
-    comp._runtime_conf_path = path
-    assert os.path.exists(path)
-    comp._cleanup_runtime_conf()
-    assert not os.path.exists(path)
-    assert comp._runtime_conf_path is None
-
-
-def test_cleanup_runtime_conf_no_file(monkeypatch):
-    monkeypatch.chdir("/tmp")
-    comp = ChronyComponent(make_context())
-    comp._runtime_conf_path = None
-    comp._cleanup_runtime_conf()  # should not raise
-
-
 # -- _poll_chronyc ------------------------------------------------------------
 
 TRACKING_CSV = (
@@ -603,22 +543,20 @@ def test_start_fails_when_chronyc_missing(monkeypatch):
         comp._start()
 
 
-# -- stop_chronyd edge cases --------------------------------------------------
+# -- stop edge cases ----------------------------------------------------------
 
 
-def test_stop_chronyd_already_exited(monkeypatch):
-    """When process already exited, stop cleans up without error."""
+@patch("lucid_component_chrony.component.chrony_client")
+def test_stop_when_not_running(mock_client, monkeypatch):
+    """Stop delegates to helper even when component thinks sync is inactive."""
     monkeypatch.chdir("/tmp")
+    mock_client.stop.return_value = {"ok": True}
     comp = ChronyComponent(make_context())
-    mock_proc = MagicMock()
-    mock_proc.poll.return_value = 0  # already exited
-    comp._chronyd_proc = mock_proc
     comp._sync_active = True
-    comp._runtime_conf_path = None
 
     comp._stop_chronyd()
+    mock_client.stop.assert_called_once()
     assert comp._sync_active is False
-    assert comp._chronyd_proc is None
 
 
 # -- cmd handlers with bad JSON -----------------------------------------------
@@ -634,17 +572,14 @@ def test_cmd_reset_bad_json(monkeypatch):
     assert len(results) == 1
 
 
-def test_cmd_start_sync_bad_json(monkeypatch):
+@patch("lucid_component_chrony.component.chrony_client")
+def test_cmd_start_sync_bad_json(mock_client, monkeypatch):
     monkeypatch.chdir("/tmp")
+    mock_client.start.return_value = {"ok": True}
+
     ctx = make_context()
     comp = ChronyComponent(ctx)
-
-    with patch("lucid_component_chrony.component.subprocess.Popen") as mock_popen:
-        mock_proc = MagicMock()
-        mock_proc.poll.return_value = None
-        mock_proc.pid = 99
-        mock_popen.return_value = mock_proc
-        comp.on_cmd_start_sync("{bad}")
+    comp.on_cmd_start_sync("{bad}")
 
     mqtt: FakeMqtt = ctx.mqtt
     results = [p for t, p, q, r in mqtt.published if "evt/start_sync/result" in t]
@@ -680,14 +615,12 @@ def test_cmd_cfg_set_bad_json(monkeypatch):
 # -- cmd/stop_sync when running -----------------------------------------------
 
 
-@patch("lucid_component_chrony.component.subprocess.Popen")
-@patch("lucid_component_chrony.component.shutil.which", return_value="/usr/sbin/chronyd")
-def test_cmd_stop_sync_when_running(mock_which, mock_popen, monkeypatch):
+@patch("lucid_component_chrony.component.chrony_client")
+@patch("lucid_component_chrony.component.shutil.which", return_value="/usr/bin/chronyc")
+def test_cmd_stop_sync_when_running(mock_which, mock_client, monkeypatch):
     monkeypatch.chdir("/tmp")
-    mock_proc = MagicMock()
-    mock_proc.poll.return_value = None
-    mock_proc.pid = 88
-    mock_popen.return_value = mock_proc
+    mock_client.start.return_value = {"ok": True}
+    mock_client.stop.return_value = {"ok": True}
 
     ctx = make_context()
     comp = ChronyComponent(ctx)
@@ -707,9 +640,11 @@ def test_cmd_stop_sync_when_running(mock_which, mock_popen, monkeypatch):
 # -- start_sync failure -------------------------------------------------------
 
 
-@patch("lucid_component_chrony.component.subprocess.Popen", side_effect=OSError("no chronyd"))
-def test_cmd_start_sync_failure(mock_popen, monkeypatch):
+@patch("lucid_component_chrony.component.chrony_client")
+def test_cmd_start_sync_failure(mock_client, monkeypatch):
     monkeypatch.chdir("/tmp")
+    mock_client.start.return_value = {"ok": False, "error": "systemctl restart chrony failed"}
+
     ctx = make_context()
     comp = ChronyComponent(ctx)
     comp.on_cmd_start_sync(json.dumps({"request_id": "r7"}))
@@ -720,4 +655,4 @@ def test_cmd_start_sync_failure(mock_popen, monkeypatch):
         if "evt/start_sync/result" in t
     ]
     assert results[0]["ok"] is False
-    assert "no chronyd" in results[0]["error"]
+    assert "failed" in results[0]["error"]

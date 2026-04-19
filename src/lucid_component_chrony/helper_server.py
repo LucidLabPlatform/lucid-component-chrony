@@ -1,21 +1,25 @@
 """
-Chrony helper daemon — runs as root, manages the chronyd subprocess.
+Chrony helper daemon — runs as root, manages the system chrony service.
 
 Listens on a Unix socket for JSON-line commands from the LUCID component
 (running as normal user). Handles start, stop, status, and ping.
 
 Start: lucid-chrony-helper (or python -m lucid_component_chrony.helper_server)
 Socket: LUCID_CHRONY_SOCKET or /run/lucid/chrony.sock
+
+start  → writes /etc/chrony/chrony.conf with the requested NTP server,
+         then runs ``systemctl restart chrony``.
+stop   → resets /etc/chrony/chrony.conf to the default NTP server and
+         restarts chrony.  The service is never actually stopped so the
+         device clock stays synced at all times.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
-import signal
 import socket
 import subprocess
-import tempfile
 import threading
 from pathlib import Path
 
@@ -30,6 +34,10 @@ from .protocol import (
 logger = logging.getLogger(__name__)
 
 _CONF_TEMPLATE_PATH = Path(__file__).parent / "chrony.conf.template"
+_CHRONY_CONF_PATH = Path("/etc/chrony/chrony.conf")
+
+_DEFAULT_NTP_SERVER_ENV = "LUCID_CHRONY_DEFAULT_SERVER"
+_DEFAULT_NTP_SERVER = "10.205.10.16"
 
 LUCID_GROUP = "lucid"
 SOCKET_MODE = 0o660
@@ -37,6 +45,10 @@ SOCKET_MODE = 0o660
 
 def _get_socket_path() -> str:
     return os.environ.get("LUCID_CHRONY_SOCKET", DEFAULT_SOCKET_PATH)
+
+
+def _get_default_ntp_server() -> str:
+    return os.environ.get(_DEFAULT_NTP_SERVER_ENV, _DEFAULT_NTP_SERVER)
 
 
 def _gid_for(name: str) -> int | None:
@@ -48,72 +60,52 @@ def _gid_for(name: str) -> int | None:
 
 
 class HelperState:
-    def __init__(self) -> None:
+    def __init__(self, default_ntp_server: str) -> None:
         self._lock = threading.Lock()
-        self._chronyd_proc: subprocess.Popen | None = None
-        self._runtime_conf_path: str | None = None
+        self._default_ntp_server = default_ntp_server
+
+    # -- public commands ------------------------------------------------------
 
     def start(self, ntp_server: str, agent_id: str) -> None:
         with self._lock:
-            if self._chronyd_proc is not None and self._chronyd_proc.poll() is None:
-                logger.info("chronyd already running (pid %d)", self._chronyd_proc.pid)
-                return
-
-            # Write runtime conf from template
-            template = _CONF_TEMPLATE_PATH.read_text(encoding="utf-8")
-            content = template.format(ntp_server=ntp_server, agent_id=agent_id)
-            fd, path = tempfile.mkstemp(
-                prefix=f"lucid-chrony-{agent_id}-", suffix=".conf",
-            )
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(content)
-            self._runtime_conf_path = path
-
-            logger.info(
-                "Starting chronyd with server %s (conf: %s)", ntp_server, path,
-            )
-            self._chronyd_proc = subprocess.Popen(
-                ["chronyd", "-d", "-f", path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                preexec_fn=os.setsid,
-            )
+            self._write_conf(ntp_server)
+            self._restart_chrony()
+            logger.info("Chrony configured for server %s", ntp_server)
 
     def stop(self) -> None:
         with self._lock:
-            proc = self._chronyd_proc
-            if proc is None or proc.poll() is not None:
-                self._chronyd_proc = None
-                self._cleanup_conf()
-                return
-
-            logger.info("Stopping chronyd (pid %d)", proc.pid)
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGINT)
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                logger.warning("chronyd did not exit in 10s, sending SIGKILL")
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                proc.wait(timeout=5)
-            except ProcessLookupError:
-                pass
-
-            self._chronyd_proc = None
-            self._cleanup_conf()
+            self._write_conf(self._default_ntp_server)
+            self._restart_chrony()
+            logger.info("Chrony reset to default server %s", self._default_ntp_server)
 
     def status(self) -> dict:
         with self._lock:
-            if self._chronyd_proc is not None and self._chronyd_proc.poll() is None:
-                return {"running": True, "pid": self._chronyd_proc.pid}
-            return {"running": False, "pid": None}
+            r = subprocess.run(
+                ["systemctl", "is-active", "chrony"],
+                capture_output=True, text=True, timeout=10,
+            )
+            running = r.stdout.strip() == "active"
+            return {"running": running, "pid": None}
 
-    def _cleanup_conf(self) -> None:
-        if self._runtime_conf_path and os.path.exists(self._runtime_conf_path):
-            try:
-                os.unlink(self._runtime_conf_path)
-            except OSError:
-                pass
-            self._runtime_conf_path = None
+    # -- internal helpers -----------------------------------------------------
+
+    def _write_conf(self, ntp_server: str) -> None:
+        template = _CONF_TEMPLATE_PATH.read_text(encoding="utf-8")
+        content = template.format(ntp_server=ntp_server)
+        _CHRONY_CONF_PATH.write_text(content, encoding="utf-8")
+        os.chmod(str(_CHRONY_CONF_PATH), 0o644)
+        logger.info("Wrote %s (server=%s)", _CHRONY_CONF_PATH, ntp_server)
+
+    def _restart_chrony(self) -> None:
+        r = subprocess.run(
+            ["systemctl", "restart", "chrony"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(
+                f"systemctl restart chrony failed: "
+                f"{(r.stderr or r.stdout or '').strip()}"
+            )
 
 
 def _handle_request(state: HelperState, req: dict) -> dict:
@@ -126,9 +118,9 @@ def _handle_request(state: HelperState, req: dict) -> dict:
             return {"id": rid, "ok": True}
         if cmd == CMD_START:
             ntp_server = req.get("ntp_server")
-            agent_id = req.get("agent_id")
-            if not ntp_server or not agent_id:
-                return {"id": rid, "ok": False, "error": "ntp_server and agent_id required"}
+            agent_id = req.get("agent_id", "")
+            if not ntp_server:
+                return {"id": rid, "ok": False, "error": "ntp_server required"}
             state.start(ntp_server, agent_id)
             return {"id": rid, "ok": True}
         if cmd == CMD_STOP:
@@ -202,7 +194,10 @@ def run_server() -> None:
     server.listen(4)
     logger.info("Listening on %s", path)
 
-    state = HelperState()
+    default_server = _get_default_ntp_server()
+    state = HelperState(default_ntp_server=default_server)
+    logger.info("Default NTP server: %s", default_server)
+
     while True:
         try:
             conn, _ = server.accept()

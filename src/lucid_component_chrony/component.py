@@ -292,14 +292,9 @@ class ChronyComponent(Component):
 
             self.publish_state()
 
-    @property
-    def _chronyc_socket(self) -> str:
-        """Path to the chronyc command socket for this agent's chronyd instance."""
-        return f"/tmp/lucid-chrony-{self.context.agent_id}.sock"
-
     def _poll_chronyc(self) -> dict[str, Any] | None:
         """Run chronyc tracking + sources and return merged result."""
-        chronyc_cmd = ["chronyc", "-h", self._chronyc_socket, "-c"]
+        chronyc_cmd = ["chronyc", "-c"]
         try:
             tracking_result = subprocess.run(
                 [*chronyc_cmd, "tracking"],
