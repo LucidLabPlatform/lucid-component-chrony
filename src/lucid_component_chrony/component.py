@@ -264,10 +264,12 @@ class ChronyComponent(Component):
         self._sync_active = True
 
     def _stop_chronyd(self) -> None:
-        """Ask the helper daemon to stop chronyd."""
+        """Ask the helper daemon to restore OS default chrony config."""
         result = chrony_client.stop()
         if not result.get("ok"):
-            self._log.warning("Helper stop returned error: %s", result.get("error"))
+            error = result.get("error")
+            self._log.error("Helper stop failed: %s", error)
+            raise RuntimeError(f"Helper stop failed: {error}")
         self._sync_active = False
 
     # -- telemetry polling ----------------------------------------------------
@@ -411,7 +413,13 @@ class ChronyComponent(Component):
             return
 
         self._stop_tracking_thread()
-        self._stop_chronyd()
+        try:
+            self._stop_chronyd()
+        except Exception as exc:
+            self._log.error("stop-sync failed: %s", exc)
+            self._start_tracking_thread()
+            self.publish_result("stop_sync", request_id, ok=False, error=str(exc))
+            return
         self.publish_state()
         self.publish_result("stop_sync", request_id, ok=True, error=None)
 

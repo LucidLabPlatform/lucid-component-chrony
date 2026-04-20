@@ -7,11 +7,11 @@ Listens on a Unix socket for JSON-line commands from the LUCID component
 Start: lucid-chrony-helper (or python -m lucid_component_chrony.helper_server)
 Socket: LUCID_CHRONY_SOCKET or /run/lucid/chrony.sock
 
-start  → writes /etc/chrony/chrony.conf with the requested NTP server,
-         then runs ``systemctl restart chrony``.
-stop   → resets /etc/chrony/chrony.conf to the default NTP server and
-         restarts chrony.  The service is never actually stopped so the
-         device clock stays synced at all times.
+start  → writes /etc/chrony/chrony.conf with the requested NTP server
+         (typically 10.205.10.16, the LUCID internal NTP server), then runs
+         ``systemctl restart chrony``.
+stop   → restores chrony to the OS default (pool.ntp.org) and restarts.
+         The service is never stopped so the device clock stays synced.
 """
 from __future__ import annotations
 
@@ -36,8 +36,7 @@ logger = logging.getLogger(__name__)
 _CONF_TEMPLATE_PATH = Path(__file__).parent / "chrony.conf.template"
 _CHRONY_CONF_PATH = Path("/etc/chrony/chrony.conf")
 
-_DEFAULT_NTP_SERVER_ENV = "LUCID_CHRONY_DEFAULT_SERVER"
-_DEFAULT_NTP_SERVER = "10.205.10.16"
+_FALLBACK_CONF = "pool pool.ntp.org iburst\nmakestep 1.0 3\nrtcsync\n"
 
 LUCID_GROUP = "lucid"
 SOCKET_MODE = 0o660
@@ -45,10 +44,6 @@ SOCKET_MODE = 0o660
 
 def _get_socket_path() -> str:
     return os.environ.get("LUCID_CHRONY_SOCKET", DEFAULT_SOCKET_PATH)
-
-
-def _get_default_ntp_server() -> str:
-    return os.environ.get(_DEFAULT_NTP_SERVER_ENV, _DEFAULT_NTP_SERVER)
 
 
 def _gid_for(name: str) -> int | None:
@@ -60,9 +55,8 @@ def _gid_for(name: str) -> int | None:
 
 
 class HelperState:
-    def __init__(self, default_ntp_server: str) -> None:
+    def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._default_ntp_server = default_ntp_server
 
     # -- public commands ------------------------------------------------------
 
@@ -74,9 +68,10 @@ class HelperState:
 
     def stop(self) -> None:
         with self._lock:
-            self._write_conf(self._default_ntp_server)
+            _CHRONY_CONF_PATH.write_text(_FALLBACK_CONF, encoding="utf-8")
+            os.chmod(str(_CHRONY_CONF_PATH), 0o644)
             self._restart_chrony()
-            logger.info("Chrony reset to default server %s", self._default_ntp_server)
+            logger.info("Chrony reset to OS default (pool.ntp.org)")
 
     def status(self) -> dict:
         with self._lock:
@@ -194,9 +189,8 @@ def run_server() -> None:
     server.listen(4)
     logger.info("Listening on %s", path)
 
-    default_server = _get_default_ntp_server()
-    state = HelperState(default_ntp_server=default_server)
-    logger.info("Default NTP server: %s", default_server)
+    state = HelperState()
+    logger.info("stop-sync will restore chrony to pool.ntp.org")
 
     while True:
         try:
