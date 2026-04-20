@@ -53,8 +53,8 @@ def test_capabilities(monkeypatch):
     caps = comp.capabilities()
     assert "reset" in caps
     assert "ping" in caps
-    assert "start_sync" in caps
-    assert "stop_sync" in caps
+    assert "start-sync" in caps
+    assert "stop-sync" in caps
 
 
 def test_get_state_payload(monkeypatch):
@@ -84,7 +84,7 @@ def test_metadata_includes_capabilities(monkeypatch):
     comp = ChronyComponent(make_context())
     meta = comp.metadata()
     assert "capabilities" in meta
-    assert "start_sync" in meta["capabilities"]
+    assert "start-sync" in meta["capabilities"]
     assert meta["ntp_server"] == "pool.ntp.org"
 
 
@@ -94,8 +94,8 @@ def test_schema_has_custom_fields(monkeypatch):
     s = comp.schema()
     assert "sync_active" in s["publishes"]["state"]["fields"]
     assert "offset_ms" in s["publishes"]["state"]["fields"]
-    assert "cmd/start_sync" in s["subscribes"]
-    assert "cmd/stop_sync" in s["subscribes"]
+    assert "cmd/start-sync" in s["subscribes"]
+    assert "cmd/stop-sync" in s["subscribes"]
     assert "ntp_server" in s["publishes"]["cfg"]["fields"]
 
 

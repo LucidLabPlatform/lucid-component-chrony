@@ -173,7 +173,7 @@ class ChronyComponent(Component):
         return "chrony"
 
     def capabilities(self) -> list[str]:
-        return ["reset", "ping", "start_sync", "stop_sync"]
+        return ["reset", "ping", "start-sync", "stop-sync"]
 
     def metadata(self) -> dict[str, Any]:
         out = super().metadata()
@@ -217,8 +217,8 @@ class ChronyComponent(Component):
             "max_offset_ms": {"type": "number"},
         })
         s["subscribes"].update({
-            "cmd/start_sync": {"fields": {}},
-            "cmd/stop_sync": {"fields": {}},
+            "cmd/start-sync": {"fields": {}},
+            "cmd/stop-sync": {"fields": {}},
         })
         return s
 
