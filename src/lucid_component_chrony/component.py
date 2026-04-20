@@ -138,11 +138,19 @@ def parse_chronyc_sources_csv(output: str) -> int:
 # -- component ----------------------------------------------------------------
 
 class ChronyComponent(Component):
-    """Manages a chronyd subprocess and publishes NTP sync telemetry.
+    """Monitors system chrony and manages NTP server configuration.
+
+    The tracking thread always runs while the component is active, polling
+    chronyc and publishing the actual sync state. start-sync / stop-sync
+    reconfigure the NTP server via the helper daemon — the tracking thread
+    reflects the result automatically.
+
+    sync_active is derived from the chronyc poll: True when chrony reports
+    a valid stratum (< 16), False when unreachable or unsynchronised.
 
     Retained: metadata, status, state, cfg.
     Telemetry: offset_ms, stratum, reachability.
-    Commands: start_sync, stop_sync, reset, ping, cfg/set.
+    Commands: start-sync, stop-sync, reset, ping, cfg/set.
     """
 
     _DEFAULT_TELEMETRY_CFG = {
@@ -161,8 +169,6 @@ class ChronyComponent(Component):
         self._telemetry_interval_s: float = float(cfg.get("telemetry_interval_s", 10))
         self._max_offset_ms: float = float(cfg.get("max_offset_ms", 10.0))
 
-        # Runtime state
-        self._sync_active: bool = False
         self._tracking_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._latest_tracking: dict[str, Any] = {}
@@ -183,11 +189,13 @@ class ChronyComponent(Component):
 
     def get_state_payload(self) -> dict[str, Any]:
         with self._tracking_lock:
+            stratum = self._latest_tracking.get("stratum")
+            sync_active = stratum is not None and stratum < 16
             return {
-                "sync_active": self._sync_active,
+                "sync_active": sync_active,
                 "ntp_server": self._ntp_server,
                 "offset_ms": self._latest_tracking.get("offset_ms"),
-                "stratum": self._latest_tracking.get("stratum"),
+                "stratum": stratum,
                 "reachability": self._latest_tracking.get("reachability"),
                 "ref_id": self._latest_tracking.get("ref_id"),
                 "last_poll_at": self._latest_tracking.get("polled_at"),
@@ -242,13 +250,12 @@ class ChronyComponent(Component):
 
     def _stop(self) -> None:
         self._stop_tracking_thread()
-        self._stop_chronyd()
         self._log.info("Chrony component stopped")
 
     # -- chronyd lifecycle via helper daemon ----------------------------------
 
     def _start_chronyd(self) -> None:
-        """Ask the helper daemon to start chronyd."""
+        """Ask the helper daemon to configure chrony with the LUCID NTP server."""
         result = chrony_client.start(
             ntp_server=self._ntp_server,
             agent_id=self.context.agent_id,
@@ -261,16 +268,16 @@ class ChronyComponent(Component):
                     "Run: sudo lucid-chrony-helper-installer --install-once"
                 )
             raise RuntimeError(f"Helper start failed: {error}")
-        self._sync_active = True
+        self._log.info("Chrony configured for LUCID server %s", self._ntp_server)
 
     def _stop_chronyd(self) -> None:
-        """Ask the helper daemon to restore OS default chrony config."""
+        """Ask the helper daemon to restore OS default chrony config (pool.ntp.org)."""
         result = chrony_client.stop()
         if not result.get("ok"):
             error = result.get("error")
             self._log.error("Helper stop failed: %s", error)
             raise RuntimeError(f"Helper stop failed: {error}")
-        self._sync_active = False
+        self._log.info("Chrony restored to OS default (pool.ntp.org)")
 
     # -- telemetry polling ----------------------------------------------------
 
@@ -288,14 +295,19 @@ class ChronyComponent(Component):
             self._tracking_thread = None
 
     def _tracking_loop(self) -> None:
-        """Poll chronyc periodically and publish telemetry."""
+        """Poll chronyc periodically and publish state + telemetry."""
         while not self._stop_event.wait(timeout=self._telemetry_interval_s):
             tracking = self._poll_chronyc()
-            if tracking is None:
-                continue
 
             with self._tracking_lock:
-                self._latest_tracking = tracking
+                if tracking is None:
+                    self._latest_tracking = {}
+                else:
+                    self._latest_tracking = tracking
+
+            if tracking is None:
+                self.publish_state()
+                continue
 
             self.publish_telemetry("offset_ms", tracking["offset_ms"])
             self.publish_telemetry("stratum", tracking["stratum"])
@@ -327,7 +339,6 @@ class ChronyComponent(Component):
             if parsed is None:
                 return None
 
-            # Get reachability from sources
             sources_result = subprocess.run(
                 [*chronyc_cmd, "sources"],
                 capture_output=True, text=True, timeout=10,
@@ -377,51 +388,34 @@ class ChronyComponent(Component):
         self.publish_result("reset", request_id, ok=True, error=None)
 
     def on_cmd_start_sync(self, payload_str: str) -> None:
-        """Start chronyd subprocess if not already running."""
+        """Configure chrony to use the LUCID NTP server and restart it."""
         try:
             payload = json.loads(payload_str) if payload_str else {}
             request_id = payload.get("request_id", "")
         except json.JSONDecodeError:
             request_id = ""
-
-        if self._sync_active:
-            status = chrony_client.status()
-            if status.get("ok") and status.get("running"):
-                self.publish_result("start_sync", request_id, ok=True, error=None)
-                return
 
         try:
             self._start_chronyd()
-            if self._tracking_thread is None or not self._tracking_thread.is_alive():
-                self._start_tracking_thread()
-            self.publish_state()
-            self.publish_result("start_sync", request_id, ok=True, error=None)
+            self.publish_result("start-sync", request_id, ok=True, error=None)
         except Exception as exc:
-            self._log.error("Failed to start chronyd: %s", exc)
-            self.publish_result("start_sync", request_id, ok=False, error=str(exc))
+            self._log.error("start-sync failed: %s", exc)
+            self.publish_result("start-sync", request_id, ok=False, error=str(exc))
 
     def on_cmd_stop_sync(self, payload_str: str) -> None:
-        """Stop chronyd subprocess if running."""
+        """Restore chrony to OS default (pool.ntp.org)."""
         try:
             payload = json.loads(payload_str) if payload_str else {}
             request_id = payload.get("request_id", "")
         except json.JSONDecodeError:
             request_id = ""
 
-        if not self._sync_active:
-            self.publish_result("stop_sync", request_id, ok=True, error=None)
-            return
-
-        self._stop_tracking_thread()
         try:
             self._stop_chronyd()
+            self.publish_result("stop-sync", request_id, ok=True, error=None)
         except Exception as exc:
             self._log.error("stop-sync failed: %s", exc)
-            self._start_tracking_thread()
-            self.publish_result("stop_sync", request_id, ok=False, error=str(exc))
-            return
-        self.publish_state()
-        self.publish_result("stop_sync", request_id, ok=True, error=None)
+            self.publish_result("stop-sync", request_id, ok=False, error=str(exc))
 
     def on_cmd_cfg_set(self, payload_str: str) -> None:
         try:
@@ -466,18 +460,8 @@ class ChronyComponent(Component):
             if not val:
                 rejected["ntp_server"] = "must be a non-empty string"
             else:
-                was_active = self._sync_active
-                if was_active:
-                    self._stop_chronyd()
                 self._ntp_server = val
                 applied["ntp_server"] = self._ntp_server
-                if was_active:
-                    try:
-                        self._start_chronyd()
-                    except Exception as exc:
-                        self._log.error("Failed to restart chronyd after NTP server change: %s", exc)
-                        applied.pop("ntp_server")
-                        rejected["ntp_server"] = f"updated but restart failed: {exc}"
 
         known_keys = {"telemetry_interval_s", "max_offset_ms", "ntp_server"}
         for key in set_dict:

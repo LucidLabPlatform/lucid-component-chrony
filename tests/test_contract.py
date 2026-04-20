@@ -113,8 +113,6 @@ def test_start_monitors_without_restarting_chrony(mock_which, mock_client, monke
     comp = ChronyComponent(ctx)
     comp._start()
 
-    # sync_active stays False — user must send start_sync explicitly
-    assert comp._sync_active is False
     # tracking thread is running (monitoring system chrony)
     assert comp._tracking_thread is not None
     assert comp._tracking_thread.is_alive()
@@ -126,18 +124,20 @@ def test_start_monitors_without_restarting_chrony(mock_which, mock_client, monke
 
 @patch("lucid_component_chrony.component.chrony_client")
 @patch("lucid_component_chrony.component.shutil.which", return_value="/usr/bin/chronyc")
-def test_stop_delegates_to_helper(mock_which, mock_client, monkeypatch):
-    """Component delegates stop (reset to default) to the helper daemon."""
+def test_stop_stops_tracking_thread(mock_which, mock_client, monkeypatch):
+    """Component _stop() stops the tracking thread but does NOT call the helper daemon."""
     monkeypatch.chdir("/tmp")
-    mock_client.stop.return_value = {"ok": True}
+    mock_client.ping.return_value = {"ok": True}
 
     ctx = make_context()
     comp = ChronyComponent(ctx)
     comp._start()
-    comp._stop()
+    assert comp._tracking_thread is not None
+    assert comp._tracking_thread.is_alive()
 
-    mock_client.stop.assert_called_once()
-    assert comp._sync_active is False
+    comp._stop()
+    assert comp._tracking_thread is None
+    mock_client.stop.assert_not_called()
 
 
 # -- command handlers ---------------------------------------------------------
@@ -196,51 +196,50 @@ def test_cmd_start_sync(mock_client, monkeypatch):
     comp = ChronyComponent(ctx)
     comp.on_cmd_start_sync(json.dumps({"request_id": "r3"}))
 
-    assert comp._sync_active is True
     mqtt: FakeMqtt = ctx.mqtt
     results = [
         json.loads(p) for t, p, q, r in mqtt.published
-        if "evt/start_sync/result" in t
+        if "evt/start-sync/result" in t
     ]
     assert results[0]["ok"] is True
-
-    # Clean up
-    comp._stop_event.set()
-    if comp._tracking_thread:
-        comp._tracking_thread.join(timeout=2)
 
 
 @patch("lucid_component_chrony.component.chrony_client")
-def test_cmd_start_sync_idempotent(mock_client, monkeypatch):
+def test_cmd_start_sync_calls_helper_each_time(mock_client, monkeypatch):
+    """start-sync always calls the helper — no idempotency guard on the component side."""
     monkeypatch.chdir("/tmp")
-    mock_client.status.return_value = {"ok": True, "running": True}
+    mock_client.start.return_value = {"ok": True}
 
     ctx = make_context()
     comp = ChronyComponent(ctx)
-    comp._sync_active = True
 
-    comp.on_cmd_start_sync(json.dumps({"request_id": "r4"}))
+    comp.on_cmd_start_sync(json.dumps({"request_id": "r4a"}))
+    comp.on_cmd_start_sync(json.dumps({"request_id": "r4b"}))
 
-    # Should not call start again — already running
-    mock_client.start.assert_not_called()
+    assert mock_client.start.call_count == 2
     mqtt: FakeMqtt = ctx.mqtt
     results = [
         json.loads(p) for t, p, q, r in mqtt.published
-        if "evt/start_sync/result" in t
+        if "evt/start-sync/result" in t
     ]
-    assert results[0]["ok"] is True
+    assert len(results) == 2
+    assert all(r["ok"] for r in results)
 
 
-def test_cmd_stop_sync_when_not_running(monkeypatch):
+@patch("lucid_component_chrony.component.chrony_client")
+def test_cmd_stop_sync_when_not_running(mock_client, monkeypatch):
     monkeypatch.chdir("/tmp")
+    mock_client.stop.return_value = {"ok": True}
+
     ctx = make_context()
     comp = ChronyComponent(ctx)
     comp.on_cmd_stop_sync(json.dumps({"request_id": "r5"}))
 
+    mock_client.stop.assert_called_once()
     mqtt: FakeMqtt = ctx.mqtt
     results = [
         json.loads(p) for t, p, q, r in mqtt.published
-        if "evt/stop_sync/result" in t
+        if "evt/stop-sync/result" in t
     ]
     assert results[0]["ok"] is True
 
@@ -290,16 +289,13 @@ def test_cfg_set_ntp_server_accepted(monkeypatch):
     assert results[0]["applied"]["ntp_server"] == "10.0.0.99"
 
 
-@patch("lucid_component_chrony.component.chrony_client")
-def test_cfg_set_ntp_server_restarts_sync_if_running(mock_client, monkeypatch):
-    """Changing ntp_server while sync is active stops and restarts chronyd."""
+def test_cfg_set_ntp_server_updates_without_restart(monkeypatch):
+    """Changing ntp_server via cfg/set only updates the value — does NOT restart chrony.
+    The user must send start-sync explicitly to apply the new server."""
     monkeypatch.chdir("/tmp")
-    mock_client.stop.return_value = {"ok": True}
-    mock_client.start.return_value = {"ok": True}
 
     ctx = make_context()
     comp = ChronyComponent(ctx)
-    comp._sync_active = True
 
     comp.on_cmd_cfg_set(json.dumps({
         "request_id": "c8",
@@ -307,9 +303,6 @@ def test_cfg_set_ntp_server_restarts_sync_if_running(mock_client, monkeypatch):
     }))
 
     assert comp._ntp_server == "time.cloudflare.com"
-    mock_client.stop.assert_called_once()
-    mock_client.start.assert_called_once()
-    assert mock_client.start.call_args.kwargs["ntp_server"] == "time.cloudflare.com"
     mqtt: FakeMqtt = ctx.mqtt
     results = [
         json.loads(p) for t, p, q, r in mqtt.published
@@ -582,16 +575,14 @@ def test_start_fails_when_chronyc_missing(monkeypatch):
 
 
 @patch("lucid_component_chrony.component.chrony_client")
-def test_stop_when_not_running(mock_client, monkeypatch):
-    """Stop delegates to helper even when component thinks sync is inactive."""
+def test_stop_chronyd_delegates_to_helper(mock_client, monkeypatch):
+    """_stop_chronyd() always calls the helper daemon unconditionally."""
     monkeypatch.chdir("/tmp")
     mock_client.stop.return_value = {"ok": True}
     comp = ChronyComponent(make_context())
-    comp._sync_active = True
 
     comp._stop_chronyd()
     mock_client.stop.assert_called_once()
-    assert comp._sync_active is False
 
 
 # -- cmd handlers with bad JSON -----------------------------------------------
@@ -617,13 +608,8 @@ def test_cmd_start_sync_bad_json(mock_client, monkeypatch):
     comp.on_cmd_start_sync("{bad}")
 
     mqtt: FakeMqtt = ctx.mqtt
-    results = [p for t, p, q, r in mqtt.published if "evt/start_sync/result" in t]
+    results = [p for t, p, q, r in mqtt.published if "evt/start-sync/result" in t]
     assert len(results) == 1
-
-    # Clean up
-    comp._stop_event.set()
-    if comp._tracking_thread:
-        comp._tracking_thread.join(timeout=2)
 
 
 def test_cmd_stop_sync_bad_json(monkeypatch):
@@ -632,7 +618,7 @@ def test_cmd_stop_sync_bad_json(monkeypatch):
     comp = ChronyComponent(ctx)
     comp.on_cmd_stop_sync("{bad}")
     mqtt: FakeMqtt = ctx.mqtt
-    results = [p for t, p, q, r in mqtt.published if "evt/stop_sync/result" in t]
+    results = [p for t, p, q, r in mqtt.published if "evt/stop-sync/result" in t]
     assert len(results) == 1
 
 
@@ -663,11 +649,10 @@ def test_cmd_stop_sync_when_running(mock_which, mock_client, monkeypatch):
 
     comp.on_cmd_stop_sync(json.dumps({"request_id": "r6"}))
 
-    assert comp._sync_active is False
     mqtt: FakeMqtt = ctx.mqtt
     results = [
         json.loads(p) for t, p, q, r in mqtt.published
-        if "evt/stop_sync/result" in t
+        if "evt/stop-sync/result" in t
     ]
     assert results[0]["ok"] is True
 
@@ -687,7 +672,7 @@ def test_cmd_start_sync_failure(mock_client, monkeypatch):
     mqtt: FakeMqtt = ctx.mqtt
     results = [
         json.loads(p) for t, p, q, r in mqtt.published
-        if "evt/start_sync/result" in t
+        if "evt/start-sync/result" in t
     ]
     assert results[0]["ok"] is False
     assert "failed" in results[0]["error"]
