@@ -26,7 +26,6 @@ from pathlib import Path
 from .protocol import (
     CMD_PING,
     CMD_START,
-    CMD_STATUS,
     CMD_STOP,
     DEFAULT_SOCKET_PATH,
 )
@@ -73,15 +72,6 @@ class HelperState:
             self._restart_chrony()
             logger.info("Chrony reset to OS default (pool.ntp.org)")
 
-    def status(self) -> dict:
-        with self._lock:
-            r = subprocess.run(
-                ["systemctl", "is-active", "chrony"],
-                capture_output=True, text=True, timeout=10,
-            )
-            running = r.stdout.strip() == "active"
-            return {"running": running, "pid": None}
-
     # -- internal helpers -----------------------------------------------------
 
     def _write_conf(self, ntp_server: str) -> None:
@@ -121,8 +111,6 @@ def _handle_request(state: HelperState, req: dict) -> dict:
         if cmd == CMD_STOP:
             state.stop()
             return {"id": rid, "ok": True}
-        if cmd == CMD_STATUS:
-            return {"id": rid, "ok": True, **state.status()}
         return {"id": rid, "ok": False, "error": f"unknown cmd: {cmd}"}
     except Exception as e:
         logger.exception("Command %s failed", cmd)

@@ -15,7 +15,6 @@ from typing import Any
 from .protocol import (
     CMD_PING,
     CMD_START,
-    CMD_STATUS,
     CMD_STOP,
     DEFAULT_SOCKET_PATH,
 )
@@ -58,11 +57,6 @@ def start(ntp_server: str, agent_id: str) -> dict:
 def stop() -> dict:
     """Ask helper to stop the chronyd subprocess."""
     return _request(CMD_STOP)
-
-
-def status() -> dict:
-    """Query whether chronyd is running. Returns {ok, running, pid}."""
-    return _request(CMD_STATUS)
 
 
 def ping() -> dict:
