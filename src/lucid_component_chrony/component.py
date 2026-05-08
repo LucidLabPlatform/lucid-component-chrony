@@ -367,19 +367,11 @@ class ChronyComponent(Component):
     # -- command handlers -----------------------------------------------------
 
     def on_cmd_ping(self, payload_str: str) -> None:
-        try:
-            payload = json.loads(payload_str) if payload_str else {}
-            request_id = payload.get("request_id", "")
-        except json.JSONDecodeError:
-            request_id = ""
+        request_id, _payload = self._parse_cmd_payload(payload_str)
         self.publish_result("ping", request_id, ok=True, error=None)
 
     def on_cmd_reset(self, payload_str: str) -> None:
-        try:
-            payload = json.loads(payload_str) if payload_str else {}
-            request_id = payload.get("request_id", "")
-        except json.JSONDecodeError:
-            request_id = ""
+        request_id, _payload = self._parse_cmd_payload(payload_str)
 
         with self._tracking_lock:
             self._latest_tracking.clear()
@@ -389,11 +381,7 @@ class ChronyComponent(Component):
 
     def on_cmd_start_sync(self, payload_str: str) -> None:
         """Configure chrony to use the LUCID NTP server and restart it."""
-        try:
-            payload = json.loads(payload_str) if payload_str else {}
-            request_id = payload.get("request_id", "")
-        except json.JSONDecodeError:
-            request_id = ""
+        request_id, _payload = self._parse_cmd_payload(payload_str)
 
         try:
             self._start_chronyd()
@@ -404,11 +392,7 @@ class ChronyComponent(Component):
 
     def on_cmd_stop_sync(self, payload_str: str) -> None:
         """Restore chrony to OS default (pool.ntp.org)."""
-        try:
-            payload = json.loads(payload_str) if payload_str else {}
-            request_id = payload.get("request_id", "")
-        except json.JSONDecodeError:
-            request_id = ""
+        request_id, _payload = self._parse_cmd_payload(payload_str)
 
         try:
             self._stop_chronyd()

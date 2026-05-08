@@ -589,37 +589,49 @@ def test_stop_chronyd_delegates_to_helper(mock_client, monkeypatch):
 
 
 def test_cmd_reset_bad_json(monkeypatch):
+    """Bad JSON now routes through SDK _make_cmd_handler exception path: ok=false."""
     monkeypatch.chdir("/tmp")
     ctx = make_context()
     comp = ChronyComponent(ctx)
-    comp.on_cmd_reset("{bad json}")
+    handler = comp._make_cmd_handler("reset", comp.on_cmd_reset)
+    handler("{bad json}")
     mqtt: FakeMqtt = ctx.mqtt
-    results = [p for t, p, q, r in mqtt.published if "evt/reset/result" in t]
+    results = [json.loads(p) for t, p, q, r in mqtt.published if "evt/reset/result" in t]
     assert len(results) == 1
+    assert results[0]["ok"] is False
+    assert "invalid JSON payload" in results[0]["error"]
 
 
 @patch("lucid_component_chrony.component.chrony_client")
 def test_cmd_start_sync_bad_json(mock_client, monkeypatch):
+    """Bad JSON now routes through SDK _make_cmd_handler exception path: ok=false."""
     monkeypatch.chdir("/tmp")
     mock_client.start.return_value = {"ok": True}
 
     ctx = make_context()
     comp = ChronyComponent(ctx)
-    comp.on_cmd_start_sync("{bad}")
+    handler = comp._make_cmd_handler("start-sync", comp.on_cmd_start_sync)
+    handler("{bad}")
 
     mqtt: FakeMqtt = ctx.mqtt
-    results = [p for t, p, q, r in mqtt.published if "evt/start-sync/result" in t]
+    results = [json.loads(p) for t, p, q, r in mqtt.published if "evt/start-sync/result" in t]
     assert len(results) == 1
+    assert results[0]["ok"] is False
+    assert "invalid JSON payload" in results[0]["error"]
 
 
 def test_cmd_stop_sync_bad_json(monkeypatch):
+    """Bad JSON now routes through SDK _make_cmd_handler exception path: ok=false."""
     monkeypatch.chdir("/tmp")
     ctx = make_context()
     comp = ChronyComponent(ctx)
-    comp.on_cmd_stop_sync("{bad}")
+    handler = comp._make_cmd_handler("stop-sync", comp.on_cmd_stop_sync)
+    handler("{bad}")
     mqtt: FakeMqtt = ctx.mqtt
-    results = [p for t, p, q, r in mqtt.published if "evt/stop-sync/result" in t]
+    results = [json.loads(p) for t, p, q, r in mqtt.published if "evt/stop-sync/result" in t]
     assert len(results) == 1
+    assert results[0]["ok"] is False
+    assert "invalid JSON payload" in results[0]["error"]
 
 
 def test_cmd_cfg_set_bad_json(monkeypatch):
